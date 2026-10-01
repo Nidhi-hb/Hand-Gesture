@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Air Gestures – Hand Tracking</title>
+<style>
+  :root{--bg:#0b0d12;--fg:#e8ecf4;--accent:#5eead4;--card:rgba(20,24,34,.72)}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,sans-serif;overflow:hidden}
+  canvas{position:fixed;inset:0;width:100%;height:100%}
+  video{display:none}
+  #ui{position:fixed;top:12px;left:12px;right:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;z-index:2}
+  button{background:var(--card);color:var(--fg);border:1px solid rgba(255,255,255,.14);padding:8px 14px;border-radius:999px;font:inherit;font-size:14px;cursor:pointer;backdrop-filter:blur(8px)}
+  button.on{border-color:var(--accent);color:var(--accent)}
+  #status{margin-left:auto;background:var(--card);padding:8px 14px;border-radius:999px;font-size:14px;backdrop-filter:blur(8px)}
+  #start{position:fixed;inset:0;display:flex;flex-direction:column;gap:14px;align-items:center;justify-content:center;text-align:center;padding:24px;z-index:3;background:var(--bg)}
+  #start h1{margin:0;font-size:clamp(28px,5vw,44px)}
+  #start p{margin:0;max-width:460px;opacity:.75;line-height:1.5}
+  #start button{background:var(--accent);color:#04211d;border:0;font-weight:600;font-size:16px;padding:12px 26px}
+</style>
+</head>
+<body>
+<div id="start">
+  <h1>Air Gestures</h1>
+  <p>Show one or both hands to the camera. Glowing connections link your fingers and follow every move and rotation in real time.</p>
+  <button id="go">Start camera</button>
+  <p id="err"></p>
+</div>
+<div id="ui">
+  <button id="mConn" class="on">Connections</button>
+  <button id="mSkel" class="on">Skeleton</button>
+  <span id="status">Loading…</span>
+</div>
+<canvas id="c"></canvas>
+<video id="v" playsinline muted></video>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const cv = $('c'), ctx = cv.getContext('2d'), video = $('v');
+let W, H, DPR;
+function resize(){ DPR = Math.min(devicePixelRatio||1, 2); W = innerWidth; H = innerHeight; cv.width = W*DPR; cv.height = H*DPR; ctx.setTransform(DPR,0,0,DPR,0,0); }
+addEventListener('resize', resize); resize();
+
+const state = { conn:true, skel:true };
+$('mConn').onclick = e => { state.conn = !state.conn; e.target.classList.toggle('on', state.conn); };
+$('mSkel').onclick = e => { state.skel = !state.skel; e.target.classList.toggle('on', state.skel); };
+
+// Map normalized landmark -> screen, mirrored, matching "cover" video fit
+function map(p){
+  const vw = video.videoWidth||1280, vh = video.videoHeight||720;
+  const s = Math.max(W/vw, H/vh), dw = vw*s, dh = vh*s;
+  return { x: W - ((p.x*dw) - (dw-W)/2) - 0, y: p.y*dh - (dh-H)/2 };
+}
+const d = (a,b) => Math.hypot(a.x-b.x, a.y-b.y);
+
+const BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+const TIPS = [4,8,12,16,20];
+
+function glowLine(a,b,color,w,alpha=1){
+  ctx.globalAlpha = alpha; ctx.strokeStyle = color; ctx.lineWidth = w;
+  ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
+}
+
+let last = { hands: [] };
+function onResults(r){
+  last.hands = (r.multiHandLandmarks||[]).map(h => h.map(map));
+  $('status').textContent = last.hands.length ? `${last.hands.length} hand${last.hands.length>1?'s':''} tracked` : 'Show your hand';
+}
+
+function render(){
+  // video background (mirrored, cover)
+  ctx.globalAlpha = 1; ctx.fillStyle = '#0b0d12'; ctx.fillRect(0,0,W,H);
+  if (video.videoWidth){
+    const vw = video.videoWidth, vh = video.videoHeight, s = Math.max(W/vw,H/vh), dw = vw*s, dh = vh*s;
+    ctx.save(); ctx.translate(W,0); ctx.scale(-1,1);
+    ctx.globalAlpha = .55; ctx.drawImage(video, (W-dw)/2, (H-dh)/2, dw, dh); ctx.restore();
+  }
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+
+  const hands = last.hands;
+  hands.forEach((pts, hi) => {
+    const size = d(pts[0], pts[9]) || 1;
+
+    if (state.skel){
+      ctx.shadowBlur = 10; ctx.shadowColor = '#5eead4';
+      for (const [a,b] of BONES) glowLine(pts[a], pts[b], '#5eead4', 2, .8);
+      ctx.shadowBlur = 0;
+      ctx.globalAlpha = 1; ctx.fillStyle = '#fff';
+      pts.forEach(p => { ctx.beginPath(); ctx.arc(p.x,p.y,3,0,7); ctx.fill(); });
+    }
+
+    // fingertip connections within a hand: closer tips glow brighter
+    if (state.conn){
+      ctx.shadowBlur = 12;
+      for (let i=0;i<TIPS.length;i++) for (let j=i+1;j<TIPS.length;j++){
+        const a = pts[TIPS[i]], b = pts[TIPS[j]], t = Math.max(0, 1 - d(a,b)/(size*3));
+        ctx.shadowColor = `hsl(${280+hi*60} 90% 65%)`;
+        glowLine(a,b,`hsl(${280+hi*60} 90% 70%)`, 1+t*3, .25+t*.75);
+      }
+      ctx.shadowBlur = 0;
+    }
+  });
+
+  // cross-hand connections between matching fingertips
+  if (state.conn && hands.length === 2){
+    ctx.shadowBlur = 16;
+    TIPS.forEach((t,i) => {
+      ctx.shadowColor = `hsl(${i*60} 90% 65%)`;
+      glowLine(hands[0][t], hands[1][t], `hsl(${i*60} 90% 65%)`, 2.5, .95);
+    });
+    ctx.shadowBlur = 0;
+  }
+
+  ctx.globalAlpha = 1;
+  requestAnimationFrame(render);
+}
+
+$('go').onclick = async () => {
+  $('go').disabled = true; $('err').textContent = '';
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:'user', width:{ideal:1280}, height:{ideal:720} }, audio:false });
+    video.srcObject = stream; await video.play();
+    const hands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}` });
+    hands.setOptions({ maxNumHands:2, modelComplexity:1, minDetectionConfidence:.6, minTrackingConfidence:.5 });
+    hands.onResults(onResults);
+    $('start').style.display = 'none'; $('status').textContent = 'Loading model…';
+    let busy = false;
+    (async function loop(){
+      if (!busy && video.readyState >= 2){ busy = true; try{ await hands.send({image:video}); }catch(e){} busy = false; }
+      requestAnimationFrame(loop);
+    })();
+    render();
+  }catch(e){
+    $('go').disabled = false;
+    $('err').textContent = 'Could not start: ' + (e.message||e) + '. Camera needs HTTPS or localhost, and permission allowed.';
+  }
+};
+</script>
+</body>
+</html>
